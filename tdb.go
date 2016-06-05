@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -99,7 +100,7 @@ func main() {
 		itemlist = append(itemlist, item)
 	}
 	// Dump the data into an importable json/JavaScript file
-	out, _ := json.MarshalIndent(Dump{Items: itemlist, Recipes: recipes, ItemIndex: itemIndex, RecipeIndex: recipeIndex, Relations: relations}, "", "  ")
+	out, _ := json.Marshal(Dump{Items: itemlist, Recipes: recipes, ItemIndex: itemIndex, RecipeIndex: recipeIndex, Relations: relations})
 	ioutil.WriteFile("data.json", []byte(fmt.Sprintf("var data = %s;", out)), 0777)
 }
 
@@ -200,21 +201,33 @@ func listWorkstationRecipes(items map[string]int, workstations []Workstation, ur
 	res, _ := http.Get("http://terraria.gamepedia.com" + url)
 	defer res.Body.Close()
 
-	body := bufio.NewScanner(res.Body)
-	for body.Scan() {
+	raw, _ := ioutil.ReadAll(res.Body)
+	raw = bytes.Replace(raw, []byte("</tr><tr>"), []byte("</tr>\n<tr>"), -1) // Split combined lines
+
+	// Create a scanner that can skip unintersting lines
+	body := bufio.NewScanner(bytes.NewReader(raw))
+	scan := func() {
+		body.Scan()
+		if !strings.Contains(body.Text(), "title") {
+			body.Scan()
+		}
+	}
+	// Iterate the recipes
+	for {
 		// Skip any bullshit before the item listing
 		line := body.Text()
 		if !strings.Contains(line, "style=\"text-align:center;width:1%\">") {
-			continue
+			if body.Scan() {
+				continue
+			}
+			break
 		}
 		recipe := Recipe{
 			Workstations: workstations,
 		}
-		// Strip out the item name from the next line
-		body.Scan()
-		if strings.Contains(body.Text(), "src") {
-			body.Scan()
-		}
+		// Strip out the item name from the next line (each item is in two lines)
+		scan()
+
 		item := strings.TrimSpace(regexp.MustCompile("title=\"([^\"]+)\"").FindStringSubmatch(body.Text())[1])
 		recipe.Product = Ingredient{
 			Item:  items[item],
@@ -223,17 +236,14 @@ func listWorkstationRecipes(items map[string]int, workstations []Workstation, ur
 		if match := regexp.MustCompile("\\(([0-9]+)\\)").FindStringSubmatch(body.Text()); len(match) > 0 {
 			recipe.Product.Count, _ = strconv.Atoi(match[1])
 		}
-		// Strip out ingredients from the next lines
-		for {
-			body.Scan()
-			if strings.Contains(body.Text(), "src") {
-				body.Scan()
-			}
-			match := regexp.MustCompile("title=\"([^\"]+)\"").FindStringSubmatch(body.Text())
-			if len(match) == 0 {
-				break
-			}
-			name, count := strings.TrimSpace(match[1]), 1
+		components, _ := strconv.Atoi(strings.TrimSpace(regexp.MustCompile("rowspan=\"([0-9]+)\"").FindStringSubmatch(body.Text())[1]))
+
+		// Strip out ingredients from the next lines (each item is in two lines)
+		for i := 0; i < components; i++ {
+			scan()
+			scan()
+
+			name, count := strings.TrimSpace(regexp.MustCompile("title=\"([^\"]+)\"").FindStringSubmatch(body.Text())[1]), 1
 			if match := regexp.MustCompile("\\(([0-9]+)\\)").FindStringSubmatch(body.Text()); len(match) > 0 {
 				count, _ = strconv.Atoi(match[1])
 			}
